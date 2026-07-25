@@ -33,6 +33,11 @@ pub struct Policy {
     pub accepted_keys: HashMap<Circuit, Vec<[u8; 32]>>,
     pub domain: FieldElement,
     pub context: FieldElement,
+    /// Whether the bundle must show the Document Signer belongs to a trusted
+    /// set. Left off, a bundle proves only that some key signed the document.
+    pub require_trust_anchor: bool,
+    /// The registry an anchor proof has to be against, when one is required.
+    pub registry_root: Option<FieldElement>,
 }
 
 impl Policy {
@@ -41,7 +46,17 @@ impl Policy {
             accepted_keys: HashMap::new(),
             domain,
             context,
+            require_trust_anchor: false,
+            registry_root: None,
         }
+    }
+
+    pub fn require_anchor(mut self, registry_root: FieldElement) -> Self {
+        self.require_trust_anchor = true;
+
+        self.registry_root = Some(registry_root);
+
+        self
     }
 
     pub fn accept(mut self, circuit: Circuit, key_hash: [u8; 32]) -> Self {
@@ -59,6 +74,11 @@ pub struct Verified {
     pub nullifier: Option<FieldElement>,
     pub dsc_commitment: FieldElement,
     pub disclosed_fields: Vec<(u64, [FieldElement; 4])>,
+    /// The registry the signer was shown to belong to, when the bundle
+    /// carried a trust anchor proof. Without one the bundle establishes that
+    /// some key signed the document and nothing about whose key it is, which
+    /// is why `require_trust_anchor` exists.
+    pub signer_registry_root: Option<FieldElement>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,6 +93,9 @@ pub enum Failure {
     UnlinkedDataGroup { circuit: &'static str },
     UnlinkedCommitment { circuit: &'static str },
     NullifierFromAnotherDocument,
+    NoTrustAnchorProof,
+    AnchorForAnotherSigner,
+    AnchorAgainstAnotherRegistry,
     Malformed(String),
 }
 
@@ -116,6 +139,17 @@ impl std::fmt::Display for Failure {
             }
             Self::NullifierFromAnotherDocument => {
                 write!(f, "the nullifier was derived from a different document")
+            }
+            Self::NoTrustAnchorProof => write!(
+                f,
+                "this verifier requires the Document Signer to be shown trusted and the bundle carries no anchor proof"
+            ),
+            Self::AnchorForAnotherSigner => write!(
+                f,
+                "the anchor proof is about a different key than the one that signed the document"
+            ),
+            Self::AnchorAgainstAnotherRegistry => {
+                write!(f, "the anchor proof is against a registry this verifier does not use")
             }
             Self::Malformed(reason) => write!(f, "malformed proof bundle: {reason}"),
         }
@@ -290,13 +324,46 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
         }
     }
 
+    let dsc_commitment = security_object
+        .public_inputs
+        .sod_dsc_commitment()
+        .map_err(malformed)?;
+
+    let mut signer_registry_root = None;
+
+    for proof in proofs.iter().filter(|p| p.circuit == Circuit::Anchor) {
+        if proof
+            .public_inputs
+            .anchor_dsc_commitment()
+            .map_err(malformed)?
+            != dsc_commitment
+        {
+            return Err(Failure::AnchorForAnotherSigner);
+        }
+
+        let root = proof
+            .public_inputs
+            .anchor_registry_root()
+            .map_err(malformed)?;
+
+        if let Some(expected) = policy.registry_root {
+            if root != expected {
+                return Err(Failure::AnchorAgainstAnotherRegistry);
+            }
+        }
+
+        signer_registry_root = Some(root);
+    }
+
+    if policy.require_trust_anchor && signer_registry_root.is_none() {
+        return Err(Failure::NoTrustAnchorProof);
+    }
+
     Ok(Verified {
         nullifier,
-        dsc_commitment: security_object
-            .public_inputs
-            .sod_dsc_commitment()
-            .map_err(malformed)?,
+        dsc_commitment,
         disclosed_fields,
+        signer_registry_root,
     })
 }
 

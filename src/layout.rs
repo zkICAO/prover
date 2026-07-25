@@ -21,6 +21,7 @@ pub enum Circuit {
     Member,
     Reveal,
     Nullifier,
+    Anchor,
 }
 
 impl Circuit {
@@ -33,6 +34,7 @@ impl Circuit {
             Self::Member => "predicate_member",
             Self::Reveal => "predicate_reveal",
             Self::Nullifier => "nullifier",
+            Self::Anchor => "anchor",
         }
     }
 
@@ -45,6 +47,7 @@ impl Circuit {
             Self::Member => 5,
             Self::Reveal => 9,
             Self::Nullifier => 5,
+            Self::Anchor => 4,
         }
     }
 
@@ -59,6 +62,7 @@ impl Circuit {
             Self::Member => 3,
             Self::Reveal => 7,
             Self::Nullifier => 2,
+            Self::Anchor => 1,
         }
     }
 
@@ -184,6 +188,19 @@ impl PublicInputs {
         self.at(1)
     }
 
+    // anchor: registry_root, domain, context, dsc_commitment
+    pub fn anchor_registry_root(&self) -> Result<FieldElement, Error> {
+        self.expect(Circuit::Anchor)?;
+
+        self.at(0)
+    }
+
+    pub fn anchor_dsc_commitment(&self) -> Result<FieldElement, Error> {
+        self.expect(Circuit::Anchor)?;
+
+        self.at(3)
+    }
+
     pub fn nullifier_value(&self) -> Result<FieldElement, Error> {
         self.expect(Circuit::Nullifier)?;
 
@@ -210,7 +227,7 @@ fn unexpected(circuit: Circuit) -> Error {
 mod tests {
     use super::*;
 
-    const ALL: [Circuit; 7] = [
+    const ALL: [Circuit; 8] = [
         Circuit::Sod,
         Circuit::DgExtract,
         Circuit::Attributes,
@@ -218,6 +235,7 @@ mod tests {
         Circuit::Member,
         Circuit::Reveal,
         Circuit::Nullifier,
+        Circuit::Anchor,
     ];
 
     fn inputs(circuit: Circuit) -> PublicInputs {
@@ -288,6 +306,8 @@ mod tests {
             Some(Circuit::Reveal)
         } else if package.starts_with("nullifier_") {
             Some(Circuit::Nullifier)
+        } else if package.starts_with("anchor_") {
+            Some(Circuit::Anchor)
         } else {
             None
         }
@@ -415,6 +435,17 @@ mod tests {
                     assert_eq!(
                         names[index_of(&public.referenced_commitment().unwrap())],
                         "commitment"
+                    );
+                }
+                Circuit::Anchor => {
+                    assert_eq!(
+                        names[index_of(&public.anchor_registry_root().unwrap())],
+                        "registry_root"
+                    );
+
+                    assert_eq!(
+                        names[index_of(&public.anchor_dsc_commitment().unwrap())],
+                        "return[0]"
                     );
                 }
                 Circuit::Nullifier => {

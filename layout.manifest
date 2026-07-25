@@ -1,5 +1,6 @@
 # Public input order per circuit, generated from the compiled ABIs.
 # Each name is one field element, in the order Barretenberg lays them out.
+anchor_dsc_inclusion registry_root domain context return[0]
 attributes_mrz_td1_sha256 dg_binding current_yyyymmdd domain context return[0]
 attributes_mrz_td3_sha256 dg_binding current_yyyymmdd domain context return[0]
 dg_extract_sha256_ec512 dg_number econtent_binding domain context return[0]
