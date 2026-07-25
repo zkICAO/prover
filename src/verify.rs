@@ -90,6 +90,7 @@ pub enum Failure {
     WrongDomain { circuit: &'static str },
     WrongContext { circuit: &'static str },
     ContextNotSet,
+    DomainNotSet,
     UnlinkedDataGroup { circuit: &'static str },
     UnlinkedCommitment { circuit: &'static str },
     NullifierFromAnotherDocument,
@@ -125,6 +126,10 @@ impl std::fmt::Display for Failure {
                 write!(f, "{circuit} carries a different session context")
             }
             Self::ContextNotSet => write!(f, "the session context is zero"),
+            Self::DomainNotSet => write!(
+                f,
+                "the application domain is zero, which would put every application in one scope"
+            ),
             Self::UnlinkedDataGroup { circuit } => {
                 write!(
                     f,
@@ -164,6 +169,13 @@ impl std::error::Error for Failure {}
 pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Failure> {
     if policy.context.is_zero() {
         return Err(Failure::ContextNotSet);
+    }
+
+    // A zero domain collapses every application into one scope, so the same
+    // holder would carry the same nullifier everywhere. The circuits reject
+    // it too; a verifier that never reaches them should not be able to ask.
+    if policy.domain.is_zero() {
+        return Err(Failure::DomainNotSet);
     }
 
     let mut security_objects = Vec::new();
