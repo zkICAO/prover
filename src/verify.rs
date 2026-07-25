@@ -20,17 +20,46 @@ use crate::layout::{Circuit, PublicInputs};
 
 pub struct Proof {
     pub circuit: Circuit,
+    /// The key this proof is checked against. A policy accepts keys by their
+    /// bytes rather than by a digest supplied alongside them: a digest and
+    /// the key it claims to describe are two independent values, and a
+    /// sender who chose both could present an accepted digest next to a key
+    /// of their own.
     pub verification_key: Vec<u8>,
-    pub verification_key_hash: [u8; 32],
     pub bytes: Vec<u8>,
     pub public_inputs: PublicInputs,
+}
+
+/// What a bundle actually proved. A verifier that only learns the checks
+/// passed does not know which question was answered: the prover chooses the
+/// field, the range and the set, and nothing in a circuit ties those to what
+/// was asked.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Statement {
+    DataGroup {
+        number: u64,
+    },
+    Compare {
+        field_id: u64,
+        minimum: u64,
+        maximum: u64,
+    },
+    Member {
+        field_id: u64,
+        set_root: FieldElement,
+    },
+    Reveal {
+        field_id: u64,
+        length: u64,
+        value: [FieldElement; 4],
+    },
 }
 
 /// What a relying party decides in advance: which circuit variants it trusts,
 /// which application it is, and the freshness value it issued for this
 /// exchange.
 pub struct Policy {
-    pub accepted_keys: HashMap<Circuit, Vec<[u8; 32]>>,
+    pub accepted_keys: HashMap<Circuit, Vec<Vec<u8>>>,
     pub domain: FieldElement,
     pub context: FieldElement,
     /// Whether the bundle must show the Document Signer belongs to a trusted
@@ -38,6 +67,13 @@ pub struct Policy {
     pub require_trust_anchor: bool,
     /// The registry an anchor proof has to be against, when one is required.
     pub registry_root: Option<FieldElement>,
+    /// The window the date a proof resolved against has to fall in.
+    ///
+    /// That date decides the century of a two digit year, so a prover who
+    /// picks it moves a birth date by a hundred years: a holder born in 2010
+    /// reads as 1910 and passes an adult check. It also gates certificate
+    /// validity in the chain anchor. Left unset, nothing constrains it.
+    pub date_window: Option<(u64, u64)>,
 }
 
 impl Policy {
@@ -48,7 +84,19 @@ impl Policy {
             context,
             require_trust_anchor: false,
             registry_root: None,
+            date_window: None,
         }
+    }
+
+    /// Requires every proof that resolves dates to have used one inside this
+    /// inclusive window, as YYYYMMDD. A window rather than a single day so a
+    /// bundle proved yesterday, or in another timezone, is still accepted.
+    pub fn require_date_within(mut self, earliest: u64, latest: u64) -> Self {
+        assert!(earliest <= latest, "an empty date window accepts nothing");
+
+        self.date_window = Some((earliest, latest));
+
+        self
     }
 
     pub fn require_anchor(mut self, registry_root: FieldElement) -> Self {
@@ -59,11 +107,11 @@ impl Policy {
         self
     }
 
-    pub fn accept(mut self, circuit: Circuit, key_hash: [u8; 32]) -> Self {
+    pub fn accept(mut self, circuit: Circuit, verification_key: Vec<u8>) -> Self {
         self.accepted_keys
             .entry(circuit)
             .or_default()
-            .push(key_hash);
+            .push(verification_key);
 
         self
     }
@@ -73,7 +121,13 @@ impl Policy {
 pub struct Verified {
     pub nullifier: Option<FieldElement>,
     pub dsc_commitment: FieldElement,
-    pub disclosed_fields: Vec<(u64, [FieldElement; 4])>,
+    /// Everything the bundle established, in the order the proofs appeared.
+    /// A relying party has to read this to know whether the question it asked
+    /// is the question that was answered.
+    pub statements: Vec<Statement>,
+    /// The date the proofs resolved two digit years and certificate validity
+    /// against, when any proof carried one.
+    pub asserted_date: Option<u64>,
     /// The registry the signer was shown to belong to, when the bundle
     /// carried a trust anchor proof. Without one the bundle establishes that
     /// some key signed the document and nothing about whose key it is, which
@@ -95,6 +149,7 @@ pub enum Failure {
     UnlinkedCommitment { circuit: &'static str },
     NullifierFromAnotherDocument,
     NoTrustAnchorProof,
+    DateOutsideWindow { circuit: &'static str },
     AnchorForAnotherSigner,
     AnchorAgainstAnotherRegistry,
     Malformed(String),
@@ -145,6 +200,10 @@ impl std::fmt::Display for Failure {
             Self::NullifierFromAnotherDocument => {
                 write!(f, "the nullifier was derived from a different document")
             }
+            Self::DateOutsideWindow { circuit } => write!(
+                f,
+                "{circuit} resolved dates against a date this verifier does not accept"
+            ),
             Self::NoTrustAnchorProof => write!(
                 f,
                 "this verifier requires the Document Signer to be shown trusted and the bundle carries no anchor proof"
@@ -186,7 +245,7 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
         let accepted = policy
             .accepted_keys
             .get(&proof.circuit)
-            .map(|keys| keys.contains(&proof.verification_key_hash))
+            .map(|keys| keys.iter().any(|key| key == &proof.verification_key))
             .unwrap_or(false);
 
         if !accepted {
@@ -247,6 +306,21 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
         );
     }
 
+    let mut statements = Vec::new();
+
+    let mut asserted_date = None;
+
+    for proof in proofs.iter().filter(|p| p.circuit == Circuit::DgExtract) {
+        let number = proof
+            .public_inputs
+            .dg_number()
+            .map_err(malformed)?
+            .to_u64()
+            .map_err(malformed)?;
+
+        statements.push(Statement::DataGroup { number });
+    }
+
     let mut commitments = Vec::new();
 
     for proof in proofs.iter().filter(|p| p.circuit == Circuit::Attributes) {
@@ -261,6 +335,17 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
             });
         }
 
+        let date = proof
+            .public_inputs
+            .attributes_current_date()
+            .map_err(malformed)?
+            .to_u64()
+            .map_err(malformed)?;
+
+        check_date(policy, date, proof.circuit.name())?;
+
+        asserted_date = Some(date);
+
         commitments.push(
             proof
                 .public_inputs
@@ -268,8 +353,6 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
                 .map_err(malformed)?,
         );
     }
-
-    let mut disclosed_fields = Vec::new();
 
     let mut nullifier = None;
 
@@ -287,22 +370,52 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
                     });
                 }
 
-                if proof.circuit == Circuit::Reveal {
-                    let field_id = proof
-                        .public_inputs
-                        .field_id()
-                        .map_err(malformed)?
-                        .to_u64()
-                        .map_err(malformed)?;
+                let field_id = proof
+                    .public_inputs
+                    .field_id()
+                    .map_err(malformed)?
+                    .to_u64()
+                    .map_err(malformed)?;
 
-                    let mut revealed = [FieldElement([0u8; 32]); 4];
+                statements.push(match proof.circuit {
+                    Circuit::Compare => Statement::Compare {
+                        field_id,
+                        minimum: proof
+                            .public_inputs
+                            .at(2)
+                            .map_err(malformed)?
+                            .to_u64()
+                            .map_err(malformed)?,
+                        maximum: proof
+                            .public_inputs
+                            .at(3)
+                            .map_err(malformed)?
+                            .to_u64()
+                            .map_err(malformed)?,
+                    },
+                    Circuit::Member => Statement::Member {
+                        field_id,
+                        set_root: proof.public_inputs.at(2).map_err(malformed)?,
+                    },
+                    _ => {
+                        let mut value = [FieldElement([0u8; 32]); 4];
 
-                    for (offset, slot) in revealed.iter_mut().enumerate() {
-                        *slot = proof.public_inputs.at(2 + offset).map_err(malformed)?;
+                        for (offset, slot) in value.iter_mut().enumerate() {
+                            *slot = proof.public_inputs.at(2 + offset).map_err(malformed)?;
+                        }
+
+                        Statement::Reveal {
+                            field_id,
+                            length: proof
+                                .public_inputs
+                                .at(6)
+                                .map_err(malformed)?
+                                .to_u64()
+                                .map_err(malformed)?,
+                            value,
+                        }
                     }
-
-                    disclosed_fields.push((field_id, revealed));
-                }
+                });
             }
             Circuit::Nullifier => {
                 let referenced = proof
@@ -356,6 +469,19 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
             return Err(Failure::AnchorForAnotherSigner);
         }
 
+        if proof.circuit == Circuit::AnchorChain {
+            let date = proof
+                .public_inputs
+                .anchor_current_date()
+                .map_err(malformed)?
+                .to_u64()
+                .map_err(malformed)?;
+
+            check_date(policy, date, proof.circuit.name())?;
+
+            asserted_date = Some(date);
+        }
+
         let root = proof
             .public_inputs
             .anchor_registry_root()
@@ -377,9 +503,24 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
     Ok(Verified {
         nullifier,
         dsc_commitment,
-        disclosed_fields,
+        statements,
+        asserted_date,
         signer_registry_root,
     })
+}
+
+/// A date a proof resolved against has to sit inside the window the verifier
+/// set, when it set one.
+fn check_date(policy: &Policy, date: u64, circuit: &'static str) -> Result<(), Failure> {
+    let Some((earliest, latest)) = policy.date_window else {
+        return Ok(());
+    };
+
+    if date < earliest || date > latest {
+        return Err(Failure::DateOutsideWindow { circuit });
+    }
+
+    Ok(())
 }
 
 fn malformed<E: std::fmt::Display>(error: E) -> Failure {

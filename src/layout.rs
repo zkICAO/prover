@@ -203,6 +203,14 @@ impl PublicInputs {
         }
     }
 
+    /// The chain mode carries the date it checked certificate validity
+    /// against; the inclusion mode checks no validity and carries none.
+    pub fn anchor_current_date(&self) -> Result<FieldElement, Error> {
+        self.expect(Circuit::AnchorChain)?;
+
+        self.at(1)
+    }
+
     pub fn anchor_dsc_commitment(&self) -> Result<FieldElement, Error> {
         match self.circuit {
             Circuit::AnchorInclusion => self.at(3),
@@ -465,6 +473,11 @@ mod tests {
                     assert_eq!(
                         names[index_of(&public.anchor_registry_root().unwrap())],
                         "master_list_root"
+                    );
+
+                    assert_eq!(
+                        names[index_of(&public.anchor_current_date().unwrap())],
+                        "current_yyyymmdd"
                     );
 
                     assert_eq!(

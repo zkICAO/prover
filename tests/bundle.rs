@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use zkicao_prover::{
-    parse_public_inputs, verify_bundle, Circuit, Failure, FieldElement, Policy, Proof,
+    parse_public_inputs, verify_bundle, Circuit, Failure, FieldElement, Policy, Proof, Statement,
 };
 
 const DOMAIN: u64 = 42;
@@ -36,12 +36,6 @@ fn load(directory: &Path, name: &str, circuit: Circuit) -> Proof {
 
     let verification_key = std::fs::read(entry.join("vk")).expect("bundle entry has no vk");
 
-    let key_hash_bytes = std::fs::read(entry.join("vk_hash")).expect("bundle entry has no vk_hash");
-
-    let mut verification_key_hash = [0u8; 32];
-
-    verification_key_hash.copy_from_slice(&key_hash_bytes);
-
     let bytes = std::fs::read(entry.join("proof")).expect("bundle entry has no proof");
 
     let raw =
@@ -52,7 +46,6 @@ fn load(directory: &Path, name: &str, circuit: Circuit) -> Proof {
     Proof {
         circuit,
         verification_key,
-        verification_key_hash,
         bytes,
         public_inputs: zkicao_prover::PublicInputs::new(circuit, values)
             .expect("public inputs do not match the circuit"),
@@ -75,7 +68,7 @@ fn policy_accepting(proofs: &[Proof]) -> Policy {
     );
 
     for proof in proofs {
-        policy = policy.accept(proof.circuit, proof.verification_key_hash);
+        policy = policy.accept(proof.circuit, proof.verification_key.clone());
     }
 
     policy
@@ -102,6 +95,23 @@ fn a_real_bundle_verifies() {
     assert!(verified.signer_registry_root.is_none());
 
     assert!(!verified.dsc_commitment.is_zero());
+
+    // The point of returning statements: the verifier can see that what was
+    // proved is the question it asked, rather than some other range over some
+    // other field.
+    assert_eq!(
+        verified.statements,
+        vec![
+            Statement::DataGroup { number: 1 },
+            Statement::Compare {
+                field_id: 5,
+                minimum: 0,
+                maximum: 20080725,
+            },
+        ]
+    );
+
+    assert_eq!(verified.asserted_date, Some(20260725));
 }
 
 #[test]
@@ -121,7 +131,7 @@ fn a_proof_from_an_unaccepted_circuit_is_refused() {
     );
 
     for proof in proofs.iter().filter(|p| p.circuit != Circuit::Sod) {
-        policy = policy.accept(proof.circuit, proof.verification_key_hash);
+        policy = policy.accept(proof.circuit, proof.verification_key.clone());
     }
 
     assert_eq!(
@@ -217,5 +227,60 @@ fn an_anchor_is_refused_when_the_policy_requires_one_and_none_is_present() {
     assert_eq!(
         verify_bundle(&proofs, &policy).unwrap_err(),
         Failure::NoTrustAnchorProof
+    );
+}
+
+// The date a proof resolves two digit years against decides the century of a
+// birth year, so a prover who picks it moves a holder born in 2010 to 1910
+// and past an adult check. A verifier that pins the window closes that.
+#[test]
+fn a_date_outside_the_window_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = bundle(&directory);
+
+    let policy = policy_accepting(&proofs).require_date_within(20250101, 20250131);
+
+    assert_eq!(
+        verify_bundle(&proofs, &policy).unwrap_err(),
+        Failure::DateOutsideWindow {
+            circuit: "attributes"
+        }
+    );
+}
+
+#[test]
+fn a_date_inside_the_window_is_accepted() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = bundle(&directory);
+
+    let policy = policy_accepting(&proofs).require_date_within(20260701, 20260731);
+
+    assert!(verify_bundle(&proofs, &policy).is_ok());
+}
+
+// A key and a digest of a key are two values, and a sender who chose both
+// could present an accepted digest beside a key of their own. Acceptance is
+// by the key itself, so substituting one is simply a key that is not accepted.
+#[test]
+fn a_substituted_verification_key_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let mut proofs = bundle(&directory);
+
+    let policy = policy_accepting(&proofs);
+
+    proofs[0].verification_key[0] ^= 1;
+
+    assert_eq!(
+        verify_bundle(&proofs, &policy).unwrap_err(),
+        Failure::UntrustedVerificationKey { circuit: "sod" }
     );
 }

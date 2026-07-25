@@ -13,8 +13,11 @@
 //! ```no_run
 //! use zkicao_prover::{Circuit, FieldElement, Policy, verify_bundle};
 //!
+//! let verification_key = std::fs::read("vk").unwrap();
+//!
 //! let policy = Policy::new(FieldElement::from_u64(42), FieldElement::from_u64(7))
-//!     .accept(Circuit::Sod, [0u8; 32]);
+//!     .accept(Circuit::Sod, verification_key)
+//!     .require_date_within(20260701, 20260731);
 //!
 //! let verified = verify_bundle(&[], &policy);
 //! ```
@@ -25,4 +28,4 @@ mod verify;
 
 pub use field::{parse_public_inputs, Error, FieldElement};
 pub use layout::{Circuit, PublicInputs};
-pub use verify::{verify_bundle, Failure, Policy, Proof, Verified};
+pub use verify::{verify_bundle, Failure, Policy, Proof, Statement, Verified};
