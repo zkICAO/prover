@@ -1,17 +1,32 @@
 # zkICAO prover
 
-Rust proving and off-chain verification library for zkICAO circuits.
+Off-chain verification for zkICAO proofs.
 
-Status: skeleton. The crate contains no code yet; it has no dependencies and builds empty. Everything below describes intended contents.
+A relying party receives a bundle of proofs rather than one. Each is sound on its own and says nothing about the others, so what makes them describe a single document is a set of equalities between their public values. This crate is that check, written once so an integration does not carry its own copy of the rules.
 
-Two responsibilities:
+## What it does
 
-1. Prove and verify UltraHonk proofs for the zkICAO circuit variants, via noir_rs with native Barretenberg FFI (macOS and Linux; mobile through Swoir on iOS and noir_android on Android).
-2. The off-chain verifier: a single implementation of the cross-circuit binding checklist (domain and context equality, Security Object and data group bindings, DSC commitment, commitment equalities, nullifier bookkeeping) plus the accepted-variant verification key whitelist that prevents algorithm downgrade. Relying parties call one function instead of re-implementing the rules.
+`verify_bundle` runs the checklist in order. Every proof must carry a verification key the verifier accepts, then verify cryptographically, then agree on the application domain and the session context. Only then are the links checked: data group proofs must reference the authenticated Security Object, attribute proofs must reference an extracted data group, predicates and the nullifier must reference a published commitment, and the nullifier must carry the secret binding from that same Security Object.
 
-Witness preparation belongs here too, including normalizing ECDSA `s` to `n - s` when it exceeds `n/2`, which the circuits require and certificate signatures do not guarantee.
+Two failures it closes are easy to miss when integrating by hand. Proofs carrying different domains are several documents wearing one identity. A proof from a weaker circuit variant is a downgrade unless the verifier states which verification keys it accepts, which the policy makes mandatory rather than optional.
 
-Planned pins: noir_rs v1.0.0-beta.19-4, Barretenberg 4.2.0-aztecnr-rc.2. These must stay aligned with the compiler pin published in [zkICAO/circuits](https://github.com/zkICAO/circuits), since proofs are produced against circuits compiled there.
+A relying party can also require the Document Signer to be shown trusted. Without that, a bundle establishes that some key signed the document and nothing about whose key it is.
+
+## What it does not do
+
+It does not prove. Proving needs the Barretenberg FFI and the toolchain around it, and a relying party that only checks proofs should not have to build any of that. Keeping the two apart is what lets this crate have no dependencies at all, which is also what makes it small enough to read end to end before trusting it. Witness preparation, including normalizing ECDSA `s` to `n - s` when it exceeds `n/2`, belongs with proving for the same reason and is not here.
+
+Cryptographic verification is delegated to Barretenberg through its command line tool, the same prover that produced the proof, rather than reimplemented. `bb` must be on the path.
+
+It also does not keep state. Recognising a nullifier it has seen before is the application's job; this returns the value.
+
+## Layout compatibility
+
+The public input indices this crate reads are fixed by circuit signatures in [zkICAO/circuits](https://github.com/zkICAO/circuits), a separate repository, so the table here can drift from them silently. `layout.manifest` is the guard: it is generated from the compiled ABIs, committed here, and checked by tests. A signature change not reflected in a regenerated manifest fails them. It has already caught one drift.
+
+## Platform
+
+Unix. The scratch directory each verification uses is named from `/dev/urandom` and created with mode 0700, so a local user cannot predict the path, place a symlink at it, or read a proof out of it.
 
 ## Trademarks and affiliation
 
