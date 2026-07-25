@@ -21,7 +21,8 @@ pub enum Circuit {
     Member,
     Reveal,
     Nullifier,
-    Anchor,
+    AnchorInclusion,
+    AnchorChain,
 }
 
 impl Circuit {
@@ -34,7 +35,8 @@ impl Circuit {
             Self::Member => "predicate_member",
             Self::Reveal => "predicate_reveal",
             Self::Nullifier => "nullifier",
-            Self::Anchor => "anchor",
+            Self::AnchorInclusion => "anchor_inclusion",
+            Self::AnchorChain => "anchor_chain",
         }
     }
 
@@ -47,7 +49,8 @@ impl Circuit {
             Self::Member => 5,
             Self::Reveal => 9,
             Self::Nullifier => 5,
-            Self::Anchor => 4,
+            Self::AnchorInclusion => 4,
+            Self::AnchorChain => 5,
         }
     }
 
@@ -62,7 +65,8 @@ impl Circuit {
             Self::Member => 3,
             Self::Reveal => 7,
             Self::Nullifier => 2,
-            Self::Anchor => 1,
+            Self::AnchorInclusion => 1,
+            Self::AnchorChain => 2,
         }
     }
 
@@ -188,17 +192,23 @@ impl PublicInputs {
         self.at(1)
     }
 
-    // anchor: registry_root, domain, context, dsc_commitment
+    // Both anchor modes publish the trusted set first and the commitment
+    // last: inclusion carries registry_root, domain, context, commitment, and
+    // the chain mode carries master_list_root, current_yyyymmdd, domain,
+    // context, commitment.
     pub fn anchor_registry_root(&self) -> Result<FieldElement, Error> {
-        self.expect(Circuit::Anchor)?;
-
-        self.at(0)
+        match self.circuit {
+            Circuit::AnchorInclusion | Circuit::AnchorChain => self.at(0),
+            other => Err(unexpected(other)),
+        }
     }
 
     pub fn anchor_dsc_commitment(&self) -> Result<FieldElement, Error> {
-        self.expect(Circuit::Anchor)?;
-
-        self.at(3)
+        match self.circuit {
+            Circuit::AnchorInclusion => self.at(3),
+            Circuit::AnchorChain => self.at(4),
+            other => Err(unexpected(other)),
+        }
     }
 
     pub fn nullifier_value(&self) -> Result<FieldElement, Error> {
@@ -227,7 +237,7 @@ fn unexpected(circuit: Circuit) -> Error {
 mod tests {
     use super::*;
 
-    const ALL: [Circuit; 8] = [
+    const ALL: [Circuit; 9] = [
         Circuit::Sod,
         Circuit::DgExtract,
         Circuit::Attributes,
@@ -235,7 +245,8 @@ mod tests {
         Circuit::Member,
         Circuit::Reveal,
         Circuit::Nullifier,
-        Circuit::Anchor,
+        Circuit::AnchorInclusion,
+        Circuit::AnchorChain,
     ];
 
     fn inputs(circuit: Circuit) -> PublicInputs {
@@ -306,8 +317,10 @@ mod tests {
             Some(Circuit::Reveal)
         } else if package.starts_with("nullifier_") {
             Some(Circuit::Nullifier)
-        } else if package.starts_with("anchor_") {
-            Some(Circuit::Anchor)
+        } else if package.starts_with("anchor_dsc_inclusion") {
+            Some(Circuit::AnchorInclusion)
+        } else if package.starts_with("anchor_csca_chain") {
+            Some(Circuit::AnchorChain)
         } else {
             None
         }
@@ -437,10 +450,21 @@ mod tests {
                         "commitment"
                     );
                 }
-                Circuit::Anchor => {
+                Circuit::AnchorInclusion => {
                     assert_eq!(
                         names[index_of(&public.anchor_registry_root().unwrap())],
                         "registry_root"
+                    );
+
+                    assert_eq!(
+                        names[index_of(&public.anchor_dsc_commitment().unwrap())],
+                        "return[0]"
+                    );
+                }
+                Circuit::AnchorChain => {
+                    assert_eq!(
+                        names[index_of(&public.anchor_registry_root().unwrap())],
+                        "master_list_root"
                     );
 
                     assert_eq!(

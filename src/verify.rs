@@ -331,7 +331,10 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
 
     let mut signer_registry_root = None;
 
-    for proof in proofs.iter().filter(|p| p.circuit == Circuit::Anchor) {
+    for proof in proofs
+        .iter()
+        .filter(|p| p.circuit == Circuit::AnchorInclusion || p.circuit == Circuit::AnchorChain)
+    {
         if proof
             .public_inputs
             .anchor_dsc_commitment()
