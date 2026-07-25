@@ -58,7 +58,20 @@ fn bundle(directory: &Path) -> Vec<Proof> {
         load(directory, "dg_extract", Circuit::DgExtract),
         load(directory, "attributes", Circuit::Attributes),
         load(directory, "predicate_compare", Circuit::Compare),
+        load(directory, "anchor", Circuit::AnchorInclusion),
+        load(directory, "nullifier", Circuit::Nullifier),
     ]
+}
+
+/// The registry the anchor proof in the bundle was built against.
+fn registry_root(proofs: &[Proof]) -> FieldElement {
+    proofs
+        .iter()
+        .find(|p| p.circuit == Circuit::AnchorInclusion)
+        .expect("the bundle carries an anchor proof")
+        .public_inputs
+        .anchor_registry_root()
+        .expect("the anchor proof carries a registry root")
 }
 
 fn policy_accepting(proofs: &[Proof]) -> Policy {
@@ -87,12 +100,14 @@ fn a_real_bundle_verifies() {
     let verified = verify_bundle(&proofs, &policy_accepting(&proofs))
         .expect("a bundle straight from the circuits must verify");
 
-    // This bundle carries no nullifier and no anchor, so what it establishes
-    // is that a signed document exists and a statement about one of its
-    // fields holds, and nothing about which signer or which holder.
-    assert!(verified.nullifier.is_none());
+    // The bundle carries the whole chain, so all of it should come back: a
+    // holder identifier scoped to this application, and the registry the
+    // signer was shown to belong to.
+    let nullifier = verified.nullifier.expect("the bundle carries a nullifier");
 
-    assert!(verified.signer_registry_root.is_none());
+    assert!(!nullifier.is_zero());
+
+    assert_eq!(verified.signer_registry_root, Some(registry_root(&proofs)));
 
     assert!(!verified.dsc_commitment.is_zero());
 
@@ -220,13 +235,65 @@ fn an_anchor_is_refused_when_the_policy_requires_one_and_none_is_present() {
         return;
     };
 
-    let proofs = bundle(&directory);
+    let proofs: Vec<Proof> = bundle(&directory)
+        .into_iter()
+        .filter(|p| p.circuit != Circuit::AnchorInclusion)
+        .collect();
 
     let policy = policy_accepting(&proofs).require_anchor(FieldElement::from_u64(1));
 
     assert_eq!(
         verify_bundle(&proofs, &policy).unwrap_err(),
         Failure::NoTrustAnchorProof
+    );
+}
+
+#[test]
+fn an_anchor_against_another_registry_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = bundle(&directory);
+
+    let policy = policy_accepting(&proofs).require_anchor(FieldElement::from_u64(1));
+
+    assert_eq!(
+        verify_bundle(&proofs, &policy).unwrap_err(),
+        Failure::AnchorAgainstAnotherRegistry
+    );
+}
+
+#[test]
+fn the_required_anchor_is_satisfied_by_the_matching_registry() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = bundle(&directory);
+
+    let policy = policy_accepting(&proofs).require_anchor(registry_root(&proofs));
+
+    assert!(verify_bundle(&proofs, &policy).is_ok());
+}
+
+// The nullifier proves it holds the secret behind the binding the Security
+// Object proof published. Take that proof away and the binding it has to
+// match is not in the bundle at all.
+#[test]
+fn a_nullifier_without_the_document_behind_it_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs: Vec<Proof> = bundle(&directory)
+        .into_iter()
+        .filter(|p| p.circuit != Circuit::Sod)
+        .collect();
+
+    assert_eq!(
+        verify_bundle(&proofs, &policy_accepting(&proofs)).unwrap_err(),
+        Failure::NoSecurityObjectProof
     );
 }
 
