@@ -11,8 +11,8 @@
 //! downgrade unless the verifier states which verification keys it accepts.
 
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::field::FieldElement;
@@ -386,18 +386,73 @@ fn malformed<E: std::fmt::Display>(error: E) -> Failure {
     Failure::Malformed(error.to_string())
 }
 
+/// A scratch directory that removes itself, so a failure part way through
+/// verification does not leave a proof and its verification key behind.
+struct Scratch {
+    path: PathBuf,
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.path).ok();
+    }
+}
+
+/// Creates a directory no other caller can be using and no other user can
+/// have prepared.
+///
+/// The name is unpredictable and the directory is created exclusively, so a
+/// local attacker cannot win a race by placing a symlink at the path first,
+/// which would otherwise redirect the verification key and proof this writes.
+/// A name derived from the process id alone would also collide between
+/// threads: two concurrent verifications would share the three file names,
+/// and one could run `bb` against files the other had just written, which
+/// returns a verdict about a proof the caller never submitted.
+fn scratch(name: &str) -> Result<Scratch, Failure> {
+    let mut random = [0u8; 16];
+
+    let mut urandom = std::fs::File::open("/dev/urandom")
+        .map_err(|e| Failure::Malformed(format!("cannot open /dev/urandom: {e}")))?;
+
+    urandom
+        .read_exact(&mut random)
+        .map_err(|e| Failure::Malformed(format!("cannot read /dev/urandom: {e}")))?;
+
+    let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+
+    let path = std::env::temp_dir().join(format!("zkicao-{name}-{suffix}"));
+
+    // The mode is applied as the directory is created. Creating it first and
+    // restricting it afterwards leaves a window in which it exists under the
+    // process umask, which is usually world readable.
+    let mut builder = std::fs::DirBuilder::new();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        builder.mode(0o700);
+    }
+
+    // Not recursive: this has to fail rather than adopt anything that already
+    // exists at the path.
+    builder
+        .create(&path)
+        .map_err(|e| Failure::Malformed(format!("cannot create a scratch directory: {e}")))?;
+
+    Ok(Scratch { path })
+}
+
 /// Delegates the cryptographic check to Barretenberg, the same prover that
 /// produced the proof, rather than reimplementing verification here.
 fn verify_one(proof: &Proof) -> Result<bool, Failure> {
-    let dir = std::env::temp_dir().join(format!("zkicao-verify-{}", std::process::id()));
+    let scratch = scratch("verify")?;
 
-    std::fs::create_dir_all(&dir).map_err(|e| Failure::Malformed(e.to_string()))?;
+    let vk_path = scratch.path.join("vk");
 
-    let vk_path = dir.join("vk");
+    let proof_path = scratch.path.join("proof");
 
-    let proof_path = dir.join("proof");
-
-    let inputs_path = dir.join("public_inputs");
+    let inputs_path = scratch.path.join("public_inputs");
 
     write(&vk_path, &proof.verification_key)?;
 
@@ -417,20 +472,33 @@ fn verify_one(proof: &Proof) -> Result<bool, Failure> {
         .args([
             "verify",
             "-k",
-            vk_path.to_str().unwrap(),
+            path_argument(&vk_path)?,
             "-p",
-            proof_path.to_str().unwrap(),
+            path_argument(&proof_path)?,
             "-i",
-            inputs_path.to_str().unwrap(),
+            path_argument(&inputs_path)?,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map_err(|e| Failure::Malformed(format!("cannot run bb: {e}")))?;
 
-    std::fs::remove_dir_all(&dir).ok();
+    // A rejected proof and a backend that never reached a verdict are
+    // different outcomes. Reporting a crash or a signal as a rejection would
+    // be safe but would send an integrator looking at the wrong thing.
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        Some(other) => Err(Failure::Malformed(format!("bb exited with status {other}"))),
+        None => Err(Failure::Malformed(
+            "bb was terminated by a signal".to_string(),
+        )),
+    }
+}
 
-    Ok(status.success())
+fn path_argument(path: &Path) -> Result<&str, Failure> {
+    path.to_str()
+        .ok_or_else(|| Failure::Malformed("a scratch path is not valid unicode".to_string()))
 }
 
 fn write(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
@@ -438,4 +506,96 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
 
     file.write_all(bytes)
         .map_err(|e| Failure::Malformed(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scratch_directories_are_unique_and_private() {
+        let a = scratch("test").unwrap();
+
+        let b = scratch("test").unwrap();
+
+        assert_ne!(a.path, b.path, "two scratch directories must not collide");
+
+        assert!(a.path.is_dir());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&a.path).unwrap().permissions().mode();
+
+            assert_eq!(
+                mode & 0o777,
+                0o700,
+                "a scratch directory must not be readable by others"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scratch_directory_removes_itself() {
+        let path = {
+            let scratch = scratch("test").unwrap();
+
+            std::fs::write(scratch.path.join("proof"), b"secret").unwrap();
+
+            scratch.path.clone()
+        };
+
+        assert!(!path.exists(), "a proof must not outlive the verification");
+    }
+
+    // Two verifications running at once used to share three file names, so one
+    // could run the backend over files the other had just written.
+    #[test]
+    fn concurrent_scratch_directories_do_not_share_paths() {
+        let handles: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(|| scratch("test").unwrap().path.clone()))
+            .collect();
+
+        let mut paths: Vec<PathBuf> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        paths.sort();
+
+        let count = paths.len();
+
+        paths.dedup();
+
+        assert_eq!(
+            paths.len(),
+            count,
+            "concurrent scratch directories collided"
+        );
+    }
+
+    #[test]
+    fn a_bundle_without_a_security_object_is_rejected() {
+        let policy = Policy::new(FieldElement::from_u64(42), FieldElement::from_u64(7));
+
+        assert_eq!(
+            verify_bundle(&[], &policy).unwrap_err(),
+            Failure::NoSecurityObjectProof
+        );
+    }
+
+    #[test]
+    fn a_zero_scope_is_rejected_before_anything_else() {
+        let no_context = Policy::new(FieldElement::from_u64(42), FieldElement::from_u64(0));
+
+        assert_eq!(
+            verify_bundle(&[], &no_context).unwrap_err(),
+            Failure::ContextNotSet
+        );
+
+        let no_domain = Policy::new(FieldElement::from_u64(0), FieldElement::from_u64(7));
+
+        assert_eq!(
+            verify_bundle(&[], &no_domain).unwrap_err(),
+            Failure::DomainNotSet
+        );
+    }
 }
