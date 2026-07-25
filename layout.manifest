@@ -1,18 +1,18 @@
 # Public input order per circuit, generated from the compiled ABIs.
 # Each name is one field element, in the order Barretenberg lays them out.
-# Witness tools are excluded: they are executed, never proved.
-anchor_csca_chain_rsa2048_sha256_tbs512 master_list_root current_yyyymmdd domain context return[0]
-anchor_dsc_inclusion registry_root domain context return[0]
-attributes_mrz_td1_sha256 dg_binding current_yyyymmdd domain context return[0]
-attributes_mrz_td3_sha256 dg_binding current_yyyymmdd domain context return[0]
-dg_extract_sha256_ec1024 dg_number econtent_binding domain context return[0]
+# Witness tools are excluded: they are executed, never proved, so no
+# verifier reads their public inputs.
+sod_ecdsa_p256_sha256_ec512 domain context return[0] return[1] return[2]
+sod_rsa2048_v15_sha256_ec512 domain context return[0] return[1] return[2]
+sod_ecdsa_p256_sha256_ec1024 domain context return[0] return[1] return[2]
+sod_rsa2048_v15_sha256_ec1024 domain context return[0] return[1] return[2]
 dg_extract_sha256_ec512 dg_number econtent_binding domain context return[0]
-nullifier_document_number commitment secret_binding domain context return[0]
+dg_extract_sha256_ec1024 dg_number econtent_binding domain context return[0]
+attributes_mrz_td3_sha256 dg_binding current_yyyymmdd domain context return[0]
+attributes_mrz_td1_sha256 dg_binding current_yyyymmdd domain context return[0]
 predicate_compare field_id commitment minimum maximum domain context
 predicate_member field_id commitment set_root domain context
 predicate_reveal field_id commitment revealed[0] revealed[1] revealed[2] revealed[3] revealed_length domain context
-probe seed return[0]
-sod_ecdsa_p256_sha256_ec1024 domain context return[0] return[1] return[2]
-sod_ecdsa_p256_sha256_ec512 domain context return[0] return[1] return[2]
-sod_rsa2048_v15_sha256_ec1024 domain context return[0] return[1] return[2]
-sod_rsa2048_v15_sha256_ec512 domain context return[0] return[1] return[2]
+nullifier_document_number commitment secret_binding domain context return[0]
+anchor_dsc_inclusion registry_root domain context return[0]
+anchor_csca_chain_rsa2048_sha256_tbs512 master_list_root current_yyyymmdd domain context return[0]
