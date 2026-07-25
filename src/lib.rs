@@ -1,13 +1,28 @@
-//! zkICAO prover: proving and off-chain verification for zkICAO circuits.
+//! Off-chain verification for zkICAO proofs.
 //!
-//! Grows in phase P1e with two responsibilities:
+//! A relying party receives a bundle of proofs rather than one. Each proof is
+//! sound on its own and says nothing about the others, so what makes them
+//! describe a single document is a set of equalities between their public
+//! values. This crate is that check, written once so an integration does not
+//! carry its own copy of the rules.
 //!
-//! 1. Prove and verify UltraHonk proofs for the zkICAO circuit variants
-//!    (via `noir_rs` v1.0.0-beta.19-4 with native Barretenberg FFI).
-//! 2. The off-chain verifier: enforce the cross-circuit binding rules
-//!    (invariants I1..I7 of the specification) so relying parties do not
-//!    re-implement them. This includes the accepted-variant vkHash
-//!    whitelist that prevents algorithm downgrade.
+//! It has no dependencies. Cryptographic verification is delegated to
+//! Barretenberg through its command line tool, the same prover that produced
+//! the proof, rather than reimplemented here.
 //!
-//! Until P1e this crate intentionally contains no code: circuits land
-//! first in the `circuits` repository.
+//! ```no_run
+//! use zkicao_prover::{Circuit, FieldElement, Policy, verify_bundle};
+//!
+//! let policy = Policy::new(FieldElement::from_u64(42), FieldElement::from_u64(7))
+//!     .accept(Circuit::Sod, [0u8; 32]);
+//!
+//! let verified = verify_bundle(&[], &policy);
+//! ```
+
+mod field;
+mod layout;
+mod verify;
+
+pub use field::{parse_public_inputs, Error, FieldElement};
+pub use layout::{Circuit, PublicInputs};
+pub use verify::{verify_bundle, Failure, Policy, Proof, Verified};
