@@ -148,8 +148,11 @@ pub enum Failure {
     UnlinkedDataGroup { circuit: &'static str },
     UnlinkedCommitment { circuit: &'static str },
     NullifierFromAnotherDocument,
+    MoreThanOneNullifierProof,
     NoTrustAnchorProof,
+    RegistryRootNotSet,
     DateOutsideWindow { circuit: &'static str },
+    InconsistentDates,
     AnchorForAnotherSigner,
     AnchorAgainstAnotherRegistry,
     Malformed(String),
@@ -200,6 +203,21 @@ impl std::fmt::Display for Failure {
             Self::NullifierFromAnotherDocument => {
                 write!(f, "the nullifier was derived from a different document")
             }
+            Self::MoreThanOneNullifierProof => {
+                write!(
+                    f,
+                    "the bundle has more than one nullifier proof, so which value the application stores would be ambiguous"
+                )
+            }
+            Self::RegistryRootNotSet => {
+                write!(
+                    f,
+                    "the policy requires a trust anchor without fixing a registry, which would accept an anchor against any registry"
+                )
+            }
+            Self::InconsistentDates => {
+                write!(f, "the proofs in this bundle resolved dates against different dates")
+            }
             Self::DateOutsideWindow { circuit } => write!(
                 f,
                 "{circuit} resolved dates against a date this verifier does not accept"
@@ -235,6 +253,12 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
     // it too; a verifier that never reaches them should not be able to ask.
     if policy.domain.is_zero() {
         return Err(Failure::DomainNotSet);
+    }
+
+    // A required anchor without a fixed registry would accept an anchor proof
+    // against any registry, including one the prover built and published.
+    if policy.require_trust_anchor && policy.registry_root.is_none() {
+        return Err(Failure::RegistryRootNotSet);
     }
 
     let mut security_objects = Vec::new();
@@ -344,7 +368,7 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
 
         check_date(policy, date, proof.circuit.name())?;
 
-        asserted_date = Some(date);
+        record_date(&mut asserted_date, date)?;
 
         commitments.push(
             proof
@@ -443,6 +467,13 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
                     return Err(Failure::NullifierFromAnotherDocument);
                 }
 
+                // One domain fixes one policy, and one policy over one
+                // document gives one value. A second proof would make which
+                // value the application stores an accident of ordering.
+                if nullifier.is_some() {
+                    return Err(Failure::MoreThanOneNullifierProof);
+                }
+
                 nullifier = Some(proof.public_inputs.nullifier_value().map_err(malformed)?);
             }
             _ => {}
@@ -479,7 +510,7 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
 
             check_date(policy, date, proof.circuit.name())?;
 
-            asserted_date = Some(date);
+            record_date(&mut asserted_date, date)?;
         }
 
         let root = proof
@@ -507,6 +538,22 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
         asserted_date,
         signer_registry_root,
     })
+}
+
+/// Every proof in a bundle has to have resolved dates against the same date.
+/// Otherwise a prover could resolve two digit years against one date and
+/// certificate validity against another, and `asserted_date` would report
+/// whichever the checklist read last.
+fn record_date(asserted: &mut Option<u64>, date: u64) -> Result<(), Failure> {
+    match *asserted {
+        None => {
+            *asserted = Some(date);
+
+            Ok(())
+        }
+        Some(previous) if previous == date => Ok(()),
+        Some(_) => Err(Failure::InconsistentDates),
+    }
 }
 
 /// A date a proof resolved against has to sit inside the window the verifier
@@ -738,5 +785,36 @@ mod tests {
             verify_bundle(&[], &no_domain).unwrap_err(),
             Failure::DomainNotSet
         );
+    }
+
+    // The fields of a policy are public, so this state is reachable without
+    // going through `require_anchor`. It has to fail rather than accept an
+    // anchor against whatever registry the prover chose.
+    #[test]
+    fn a_required_anchor_without_a_registry_is_a_misconfiguration() {
+        let mut policy = Policy::new(FieldElement::from_u64(42), FieldElement::from_u64(7));
+
+        policy.require_trust_anchor = true;
+
+        assert_eq!(
+            verify_bundle(&[], &policy).unwrap_err(),
+            Failure::RegistryRootNotSet
+        );
+    }
+
+    #[test]
+    fn dates_must_agree_across_a_bundle() {
+        let mut date = None;
+
+        assert!(record_date(&mut date, 20260726).is_ok());
+
+        assert!(record_date(&mut date, 20260726).is_ok());
+
+        assert_eq!(
+            record_date(&mut date, 20260725).unwrap_err(),
+            Failure::InconsistentDates
+        );
+
+        assert_eq!(date, Some(20260726), "a rejected date must not be recorded");
     }
 }

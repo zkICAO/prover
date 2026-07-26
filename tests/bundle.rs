@@ -331,6 +331,26 @@ fn a_date_inside_the_window_is_accepted() {
     assert!(verify_bundle(&proofs, &policy).is_ok());
 }
 
+// One domain fixes one policy and one policy over one document gives one
+// value, so a second nullifier proof never adds information. Refusing it is
+// what keeps which value the application stores from being an accident of
+// proof ordering.
+#[test]
+fn a_second_nullifier_proof_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let mut proofs = bundle(&directory);
+
+    proofs.push(load(&directory, "nullifier", Circuit::Nullifier));
+
+    assert_eq!(
+        verify_bundle(&proofs, &policy_accepting(&proofs)).unwrap_err(),
+        Failure::MoreThanOneNullifierProof
+    );
+}
+
 // A key and a digest of a key are two values, and a sender who chose both
 // could present an accepted digest beside a key of their own. Acceptance is
 // by the key itself, so substituting one is simply a key that is not accepted.
