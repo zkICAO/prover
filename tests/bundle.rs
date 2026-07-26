@@ -580,6 +580,39 @@ fn a_leaf_proof_beside_a_registration_is_refused() {
 }
 
 #[test]
+fn a_chained_registration_bundle_verifies() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    // The variant that walked the whole chain to the country signing key.
+    // Same layout, different verification key; the master list root comes
+    // back where the registry root does.
+    let proofs = vec![
+        load(&directory, "registration_chain", Circuit::Registration),
+        load(&directory, "predicate_compare", Circuit::Compare),
+        load(&directory, "nullifier", Circuit::Nullifier),
+    ];
+
+    let verified = verify_bundle(&proofs, &policy_accepting(&proofs))
+        .expect("a chained registration bundle straight from the circuits must verify");
+
+    assert_eq!(
+        verified.signer_registry_root,
+        Some(
+            proofs[0]
+                .public_inputs
+                .registration_registry_root()
+                .unwrap()
+        )
+    );
+
+    assert_eq!(verified.asserted_date, Some(20260725));
+
+    assert!(verified.dsc_commitment.is_none());
+}
+
+#[test]
 fn a_registration_beside_a_security_object_is_refused() {
     let Some(directory) = bundle_directory() else {
         return;
