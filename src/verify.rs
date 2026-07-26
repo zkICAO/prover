@@ -618,6 +618,49 @@ fn answer_questions(
                     }
                 });
             }
+            Circuit::SessionCompareMember => {
+                let referenced = proof
+                    .public_inputs
+                    .referenced_commitment()
+                    .map_err(malformed)?;
+
+                if !commitments.contains(&referenced) {
+                    return Err(Failure::UnlinkedCommitment {
+                        circuit: proof.circuit.name(),
+                    });
+                }
+
+                statements.push(Statement::Compare {
+                    field_id: proof
+                        .public_inputs
+                        .at(0)
+                        .map_err(malformed)?
+                        .to_u64()
+                        .map_err(malformed)?,
+                    minimum: proof
+                        .public_inputs
+                        .at(1)
+                        .map_err(malformed)?
+                        .to_u64()
+                        .map_err(malformed)?,
+                    maximum: proof
+                        .public_inputs
+                        .at(2)
+                        .map_err(malformed)?
+                        .to_u64()
+                        .map_err(malformed)?,
+                });
+
+                statements.push(Statement::Member {
+                    field_id: proof
+                        .public_inputs
+                        .at(3)
+                        .map_err(malformed)?
+                        .to_u64()
+                        .map_err(malformed)?,
+                    set_root: proof.public_inputs.at(4).map_err(malformed)?,
+                });
+            }
             Circuit::Nullifier => {
                 let referenced = proof
                     .public_inputs
@@ -699,7 +742,11 @@ pub fn verify_session(
 
     for proof in proofs {
         match proof.circuit {
-            Circuit::Compare | Circuit::Member | Circuit::Reveal | Circuit::Nullifier => {}
+            Circuit::Compare
+            | Circuit::Member
+            | Circuit::Reveal
+            | Circuit::Nullifier
+            | Circuit::SessionCompareMember => {}
             _ => {
                 return Err(Failure::NotASessionProof {
                     circuit: proof.circuit.name(),

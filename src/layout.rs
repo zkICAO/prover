@@ -24,6 +24,7 @@ pub enum Circuit {
     AnchorInclusion,
     AnchorChain,
     Registration,
+    SessionCompareMember,
 }
 
 impl Circuit {
@@ -39,6 +40,7 @@ impl Circuit {
             Self::AnchorInclusion => "anchor_inclusion",
             Self::AnchorChain => "anchor_chain",
             Self::Registration => "registration",
+            Self::SessionCompareMember => "session_compare_member",
         }
     }
 
@@ -54,6 +56,7 @@ impl Circuit {
             Self::AnchorInclusion => 4,
             Self::AnchorChain => 5,
             Self::Registration => 6,
+            Self::SessionCompareMember => 8,
         }
     }
 
@@ -71,6 +74,7 @@ impl Circuit {
             Self::AnchorInclusion => 1,
             Self::AnchorChain => 2,
             Self::Registration => 0,
+            Self::SessionCompareMember => 5,
         }
     }
 
@@ -174,11 +178,13 @@ impl PublicInputs {
         self.at(4)
     }
 
-    /// The commitment a predicate or the nullifier was proved against.
+    /// The commitment a predicate, the nullifier or a session aggregate was
+    /// proved against.
     pub fn referenced_commitment(&self) -> Result<FieldElement, Error> {
         match self.circuit {
             Circuit::Compare | Circuit::Member | Circuit::Reveal => self.at(1),
             Circuit::Nullifier => self.at(0),
+            Circuit::SessionCompareMember => self.at(7),
             other => Err(unexpected(other)),
         }
     }
@@ -276,7 +282,7 @@ fn unexpected(circuit: Circuit) -> Error {
 mod tests {
     use super::*;
 
-    const ALL: [Circuit; 10] = [
+    const ALL: [Circuit; 11] = [
         Circuit::Sod,
         Circuit::DgExtract,
         Circuit::Attributes,
@@ -287,6 +293,7 @@ mod tests {
         Circuit::AnchorInclusion,
         Circuit::AnchorChain,
         Circuit::Registration,
+        Circuit::SessionCompareMember,
     ];
 
     fn inputs(circuit: Circuit) -> PublicInputs {
@@ -363,6 +370,8 @@ mod tests {
             Some(Circuit::AnchorChain)
         } else if package.starts_with("registration_") {
             Some(Circuit::Registration)
+        } else if package == "session_compare_member" {
+            Some(Circuit::SessionCompareMember)
         } else {
             None
         }
@@ -516,6 +525,12 @@ mod tests {
 
                     assert_eq!(
                         names[index_of(&public.anchor_dsc_commitment().unwrap())],
+                        "return[0]"
+                    );
+                }
+                Circuit::SessionCompareMember => {
+                    assert_eq!(
+                        names[index_of(&public.referenced_commitment().unwrap())],
                         "return[0]"
                     );
                 }

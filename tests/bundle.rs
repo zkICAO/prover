@@ -427,6 +427,65 @@ fn a_session_nullifier_from_another_document_is_refused() {
 }
 
 #[test]
+fn an_aggregated_session_verifies_against_the_stored_registration() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    // More than one question in a session aggregates into one proof; the
+    // nullifier still travels beside it.
+    let proofs = vec![
+        load(&directory, "session", Circuit::SessionCompareMember),
+        load(&directory, "nullifier", Circuit::Nullifier),
+    ];
+
+    let verified = verify_session(&proofs, &policy_accepting(&proofs), &registered(&directory))
+        .expect("an aggregated session against the stored registration must verify");
+
+    let set_root = proofs[0].public_inputs.at(4).unwrap();
+
+    assert_eq!(
+        verified.statements,
+        vec![
+            Statement::Compare {
+                field_id: 5,
+                minimum: 0,
+                maximum: 20080725,
+            },
+            Statement::Member {
+                field_id: 4,
+                set_root,
+            },
+        ]
+    );
+
+    assert!(!verified
+        .nullifier
+        .expect("the session carries a nullifier")
+        .is_zero());
+}
+
+#[test]
+fn an_aggregated_session_against_another_registration_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = vec![load(&directory, "session", Circuit::SessionCompareMember)];
+
+    let mut other = registered(&directory);
+
+    other.commitment = FieldElement::from_u64(123);
+
+    assert_eq!(
+        verify_session(&proofs, &policy_accepting(&proofs), &other).unwrap_err(),
+        Failure::UnlinkedCommitment {
+            circuit: "session_compare_member"
+        }
+    );
+}
+
+#[test]
 fn a_document_proof_in_a_session_is_refused() {
     let Some(directory) = bundle_directory() else {
         return;
