@@ -25,6 +25,7 @@ pub enum Circuit {
     AnchorChain,
     Registration,
     SessionCompareMember,
+    ChipActive,
 }
 
 impl Circuit {
@@ -41,6 +42,7 @@ impl Circuit {
             Self::AnchorChain => "anchor_chain",
             Self::Registration => "registration",
             Self::SessionCompareMember => "session_compare_member",
+            Self::ChipActive => "chip_active",
         }
     }
 
@@ -57,6 +59,7 @@ impl Circuit {
             Self::AnchorChain => 5,
             Self::Registration => 6,
             Self::SessionCompareMember => 8,
+            Self::ChipActive => 4,
         }
     }
 
@@ -75,6 +78,7 @@ impl Circuit {
             Self::AnchorChain => 2,
             Self::Registration => 0,
             Self::SessionCompareMember => 5,
+            Self::ChipActive => 1,
         }
     }
 
@@ -256,6 +260,15 @@ impl PublicInputs {
         self.at(5)
     }
 
+    // chip_active: dg_binding, domain, context, then the returned binding.
+    // A chip proof says the chip answered this exchange, and it attaches to
+    // the rest through that binding, the same way an attribute proof does.
+    pub fn chip_dg_binding(&self) -> Result<FieldElement, Error> {
+        self.expect(Circuit::ChipActive)?;
+
+        self.at(0)
+    }
+
     pub fn nullifier_value(&self) -> Result<FieldElement, Error> {
         self.expect(Circuit::Nullifier)?;
 
@@ -282,7 +295,7 @@ fn unexpected(circuit: Circuit) -> Error {
 mod tests {
     use super::*;
 
-    const ALL: [Circuit; 11] = [
+    const ALL: [Circuit; 12] = [
         Circuit::Sod,
         Circuit::DgExtract,
         Circuit::Attributes,
@@ -294,6 +307,7 @@ mod tests {
         Circuit::AnchorChain,
         Circuit::Registration,
         Circuit::SessionCompareMember,
+        Circuit::ChipActive,
     ];
 
     fn inputs(circuit: Circuit) -> PublicInputs {
@@ -372,6 +386,8 @@ mod tests {
             Some(Circuit::Registration)
         } else if package == "session_compare_member" {
             Some(Circuit::SessionCompareMember)
+        } else if package.starts_with("chip_") {
+            Some(Circuit::ChipActive)
         } else {
             None
         }
@@ -526,6 +542,12 @@ mod tests {
                     assert_eq!(
                         names[index_of(&public.anchor_dsc_commitment().unwrap())],
                         "return[0]"
+                    );
+                }
+                Circuit::ChipActive => {
+                    assert_eq!(
+                        names[index_of(&public.chip_dg_binding().unwrap())],
+                        "dg_binding"
                     );
                 }
                 Circuit::SessionCompareMember => {

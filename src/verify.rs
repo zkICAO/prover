@@ -39,6 +39,10 @@ pub enum Statement {
     DataGroup {
         number: u64,
     },
+    /// The chip itself answered a challenge this session, so the data did
+    /// not come from a copy. Absent from a bundle means only that it was not
+    /// proved, which is the usual case.
+    ChipPresent,
     Compare {
         field_id: u64,
         minimum: u64,
@@ -155,6 +159,7 @@ pub enum Failure {
     MoreThanOneNullifierProof,
     NotLinkableToRegistration { circuit: &'static str },
     NotASessionProof { circuit: &'static str },
+    ChipFromAnotherDocument,
     NoTrustAnchorProof,
     RegistryRootNotSet,
     DateOutsideWindow { circuit: &'static str },
@@ -221,6 +226,10 @@ impl std::fmt::Display for Failure {
                     "{circuit} cannot appear beside a registration proof, which does not expose the value it would have to match"
                 )
             }
+            Self::ChipFromAnotherDocument => write!(
+                f,
+                "the chip proof is about a data group no extraction in this bundle produced, so it answered for another document"
+            ),
             Self::NotASessionProof { circuit } => {
                 write!(
                     f,
@@ -346,6 +355,19 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
             statements.push(Statement::DataGroup { number });
         }
 
+        // Chip presence attaches through a data group binding, the same way
+        // an attribute proof does: the key that answered has to be the key
+        // this document's Security Object committed to.
+        for proof in proofs.iter().filter(|p| p.circuit == Circuit::ChipActive) {
+            let binding = proof.public_inputs.chip_dg_binding().map_err(malformed)?;
+
+            if !data_group_bindings.contains(&binding) {
+                return Err(Failure::ChipFromAnotherDocument);
+            }
+
+            statements.push(Statement::ChipPresent);
+        }
+
         for proof in proofs.iter().filter(|p| p.circuit == Circuit::Attributes) {
             let binding = proof
                 .public_inputs
@@ -442,7 +464,8 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
                 Circuit::DgExtract
                 | Circuit::Attributes
                 | Circuit::AnchorInclusion
-                | Circuit::AnchorChain => {
+                | Circuit::AnchorChain
+                | Circuit::ChipActive => {
                     return Err(Failure::NotLinkableToRegistration {
                         circuit: proof.circuit.name(),
                     });

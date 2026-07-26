@@ -22,9 +22,22 @@ use zkicao_prover::{
     Proof, Registered, Statement,
 };
 
-const DOMAIN: u64 = 42;
+/// The scope a bundle was proved under, read from the bundle rather than
+/// written here. The generator takes both from the environment, so a bundle
+/// proved for a chain carries that chain's sender as its context, and a test
+/// that hardcoded either would only pass for one of them.
+fn scope(proofs: &[Proof]) -> (FieldElement, FieldElement) {
+    let any = proofs.first().expect("a bundle has proofs");
 
-const CONTEXT: u64 = 99;
+    (
+        any.public_inputs
+            .domain()
+            .expect("every proof carries a domain"),
+        any.public_inputs
+            .context()
+            .expect("every proof carries a context"),
+    )
+}
 
 fn bundle_directory() -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var("ZKICAO_BUNDLE").ok()?);
@@ -64,6 +77,21 @@ fn bundle(directory: &Path) -> Vec<Proof> {
     ]
 }
 
+/// A bundle that also proves the chip answered, which is the one statement
+/// a copy of a document's data cannot make.
+fn bundle_with_chip(directory: &Path) -> Vec<Proof> {
+    let mut proofs = bundle(directory);
+
+    // The chip's key is its own data group, so it needs its own extraction:
+    // that is what puts the key inside the Security Object rather than
+    // beside it.
+    proofs.push(load(directory, "dg_extract_chip", Circuit::DgExtract));
+
+    proofs.push(load(directory, "chip", Circuit::ChipActive));
+
+    proofs
+}
+
 /// The registry the anchor proof in the bundle was built against.
 fn registry_root(proofs: &[Proof]) -> FieldElement {
     proofs
@@ -76,10 +104,9 @@ fn registry_root(proofs: &[Proof]) -> FieldElement {
 }
 
 fn policy_accepting(proofs: &[Proof]) -> Policy {
-    let mut policy = Policy::new(
-        FieldElement::from_u64(DOMAIN),
-        FieldElement::from_u64(CONTEXT),
-    );
+    let (domain, context) = scope(proofs);
+
+    let mut policy = Policy::new(domain, context);
 
     for proof in proofs {
         policy = policy.accept(proof.circuit, proof.verification_key.clone());
@@ -134,6 +161,43 @@ fn a_real_bundle_verifies() {
 }
 
 #[test]
+fn a_chip_proof_says_the_chip_answered() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = bundle_with_chip(&directory);
+
+    let verified = verify_bundle(&proofs, &policy_accepting(&proofs))
+        .expect("a bundle with a chip proof must verify");
+
+    assert!(
+        verified.statements.contains(&Statement::ChipPresent),
+        "the bundle proved chip presence and the result does not say so"
+    );
+}
+
+// The chip proof attaches through its own data group binding, so a chip that
+// answered for another document has nothing in this bundle to attach to.
+#[test]
+fn a_chip_proof_for_another_document_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    // The chip proof without the extraction that vouches for its data
+    // group, so nothing in the bundle ties that key to this document.
+    let mut proofs = bundle(&directory);
+
+    proofs.push(load(&directory, "chip", Circuit::ChipActive));
+
+    assert_eq!(
+        verify_bundle(&proofs, &policy_accepting(&proofs)).unwrap_err(),
+        Failure::ChipFromAnotherDocument
+    );
+}
+
+#[test]
 fn a_proof_from_an_unaccepted_circuit_is_refused() {
     let Some(directory) = bundle_directory() else {
         return;
@@ -144,10 +208,9 @@ fn a_proof_from_an_unaccepted_circuit_is_refused() {
     // Every key accepted except the one the Security Object proof used, which
     // is the shape of a downgrade: a valid proof from a variant this verifier
     // did not agree to.
-    let mut policy = Policy::new(
-        FieldElement::from_u64(DOMAIN),
-        FieldElement::from_u64(CONTEXT),
-    );
+    let (domain, context) = scope(&proofs);
+
+    let mut policy = Policy::new(domain, context);
 
     for proof in proofs.iter().filter(|p| p.circuit != Circuit::Sod) {
         policy = policy.accept(proof.circuit, proof.verification_key.clone());
@@ -169,7 +232,7 @@ fn a_bundle_for_another_application_is_refused() {
 
     let mut policy = policy_accepting(&proofs);
 
-    policy.domain = FieldElement::from_u64(DOMAIN + 1);
+    policy.domain = FieldElement::from_u64(1);
 
     assert_eq!(
         verify_bundle(&proofs, &policy).unwrap_err(),
@@ -187,7 +250,7 @@ fn a_bundle_from_another_session_is_refused() {
 
     let mut policy = policy_accepting(&proofs);
 
-    policy.context = FieldElement::from_u64(CONTEXT + 1);
+    policy.context = FieldElement::from_u64(1);
 
     assert_eq!(
         verify_bundle(&proofs, &policy).unwrap_err(),
