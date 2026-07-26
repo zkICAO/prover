@@ -28,4 +28,6 @@ mod verify;
 
 pub use field::{parse_public_inputs, Error, FieldElement};
 pub use layout::{Circuit, PublicInputs};
-pub use verify::{verify_bundle, Failure, Policy, Proof, Statement, Verified};
+pub use verify::{
+    verify_bundle, verify_session, Failure, Policy, Proof, Registered, Statement, Verified,
+};

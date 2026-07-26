@@ -154,6 +154,7 @@ pub enum Failure {
     NullifierFromAnotherDocument,
     MoreThanOneNullifierProof,
     NotLinkableToRegistration { circuit: &'static str },
+    NotASessionProof { circuit: &'static str },
     NoTrustAnchorProof,
     RegistryRootNotSet,
     DateOutsideWindow { circuit: &'static str },
@@ -220,6 +221,12 @@ impl std::fmt::Display for Failure {
                     "{circuit} cannot appear beside a registration proof, which does not expose the value it would have to match"
                 )
             }
+            Self::NotASessionProof { circuit } => {
+                write!(
+                    f,
+                    "a session answers questions about a registered document; {circuit} establishes a document and belongs in registration"
+                )
+            }
             Self::RegistryRootNotSet => {
                 write!(
                     f,
@@ -275,33 +282,7 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
     let mut document_proofs = Vec::new();
 
     for proof in proofs {
-        let name = proof.circuit.name();
-
-        let accepted = policy
-            .accepted_keys
-            .get(&proof.circuit)
-            .map(|keys| keys.iter().any(|key| key == &proof.verification_key))
-            .unwrap_or(false);
-
-        if !accepted {
-            return Err(Failure::UntrustedVerificationKey { circuit: name });
-        }
-
-        if !verify_one(proof)? {
-            return Err(Failure::ProofRejected { circuit: name });
-        }
-
-        let domain = proof.public_inputs.domain().map_err(malformed)?;
-
-        if domain != policy.domain {
-            return Err(Failure::WrongDomain { circuit: name });
-        }
-
-        let context = proof.public_inputs.context().map_err(malformed)?;
-
-        if context != policy.context {
-            return Err(Failure::WrongContext { circuit: name });
-        }
+        admit(proof, policy)?;
 
         if proof.circuit == Circuit::Sod || proof.circuit == Circuit::Registration {
             document_proofs.push(proof);
@@ -514,6 +495,66 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
         dsc_commitment = None;
     }
 
+    let nullifier = answer_questions(
+        proofs,
+        &commitments,
+        document_secret_binding,
+        &mut statements,
+    )?;
+
+    Ok(Verified {
+        nullifier,
+        dsc_commitment,
+        statements,
+        asserted_date,
+        signer_registry_root,
+    })
+}
+
+/// The checks every proof passes before the bundle's shape is considered: an
+/// accepted verification key, a proof the backend verifies, and the policy's
+/// domain and context.
+fn admit(proof: &Proof, policy: &Policy) -> Result<(), Failure> {
+    let name = proof.circuit.name();
+
+    let accepted = policy
+        .accepted_keys
+        .get(&proof.circuit)
+        .map(|keys| keys.iter().any(|key| key == &proof.verification_key))
+        .unwrap_or(false);
+
+    if !accepted {
+        return Err(Failure::UntrustedVerificationKey { circuit: name });
+    }
+
+    if !verify_one(proof)? {
+        return Err(Failure::ProofRejected { circuit: name });
+    }
+
+    let domain = proof.public_inputs.domain().map_err(malformed)?;
+
+    if domain != policy.domain {
+        return Err(Failure::WrongDomain { circuit: name });
+    }
+
+    let context = proof.public_inputs.context().map_err(malformed)?;
+
+    if context != policy.context {
+        return Err(Failure::WrongContext { circuit: name });
+    }
+
+    Ok(())
+}
+
+/// The per session questions. Predicates contribute statements, the nullifier
+/// has to hold the secret behind the document's binding, and a second
+/// nullifier proof is refused.
+fn answer_questions(
+    proofs: &[Proof],
+    commitments: &[FieldElement],
+    document_secret_binding: FieldElement,
+    statements: &mut Vec<Statement>,
+) -> Result<Option<FieldElement>, Failure> {
     let mut nullifier = None;
 
     for proof in proofs {
@@ -611,12 +652,79 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
         }
     }
 
+    Ok(nullifier)
+}
+
+/// What a relying party stores when a registration verifies, and holds every
+/// later session against: the commitment the document's fields sit under and
+/// the secret binding a nullifier proof has to match. Both are public values
+/// of the registration proof, or of the attribute and Passive Authentication
+/// proofs in the leaf form.
+///
+/// The holder keeps its own half: the session salt behind the commitment.
+/// Every later opening needs it, so for a registered identity it is not a
+/// per session value but a secret the holder retains. A holder who loses it
+/// cannot answer questions against this registration and has to register
+/// again, which the stored nullifier makes visible to the application.
+pub struct Registered {
+    pub commitment: FieldElement,
+    pub secret_binding: FieldElement,
+}
+
+/// Verifies a session bundle against a registration the relying party stored.
+///
+/// Registration establishes the document once. Afterwards a holder answers
+/// questions per session: predicate proofs, and optionally the nullifier,
+/// against the commitment that registration exposed. This entry point is
+/// that second half. It accepts only question proofs, requires each to link
+/// to the stored values, and enforces the accepted keys, the domain and the
+/// context exactly as `verify_bundle` does; freshness comes from the
+/// context, so a proof replayed from an earlier session is refused.
+///
+/// Document trust is not re-examined here. It was established when the
+/// registration bundle verified, and it is the caller's stored decision, so
+/// the anchor and date parts of the policy play no part in a session.
+pub fn verify_session(
+    proofs: &[Proof],
+    policy: &Policy,
+    registered: &Registered,
+) -> Result<Verified, Failure> {
+    if policy.context.is_zero() {
+        return Err(Failure::ContextNotSet);
+    }
+
+    if policy.domain.is_zero() {
+        return Err(Failure::DomainNotSet);
+    }
+
+    for proof in proofs {
+        match proof.circuit {
+            Circuit::Compare | Circuit::Member | Circuit::Reveal | Circuit::Nullifier => {}
+            _ => {
+                return Err(Failure::NotASessionProof {
+                    circuit: proof.circuit.name(),
+                });
+            }
+        }
+
+        admit(proof, policy)?;
+    }
+
+    let mut statements = Vec::new();
+
+    let nullifier = answer_questions(
+        proofs,
+        std::slice::from_ref(&registered.commitment),
+        registered.secret_binding,
+        &mut statements,
+    )?;
+
     Ok(Verified {
         nullifier,
-        dsc_commitment,
+        dsc_commitment: None,
         statements,
-        asserted_date,
-        signer_registry_root,
+        asserted_date: None,
+        signer_registry_root: None,
     })
 }
 
@@ -879,6 +987,53 @@ mod tests {
         assert_eq!(
             verify_bundle(&[], &policy).unwrap_err(),
             Failure::RegistryRootNotSet
+        );
+    }
+
+    #[test]
+    fn a_session_rejects_zero_scopes_first() {
+        let registered = Registered {
+            commitment: FieldElement::from_u64(1),
+            secret_binding: FieldElement::from_u64(2),
+        };
+
+        let no_context = Policy::new(FieldElement::from_u64(42), FieldElement::from_u64(0));
+
+        assert_eq!(
+            verify_session(&[], &no_context, &registered).unwrap_err(),
+            Failure::ContextNotSet
+        );
+
+        let no_domain = Policy::new(FieldElement::from_u64(0), FieldElement::from_u64(7));
+
+        assert_eq!(
+            verify_session(&[], &no_domain, &registered).unwrap_err(),
+            Failure::DomainNotSet
+        );
+    }
+
+    // The shape check comes before any cryptography, so this needs no real
+    // proof: a document proof has no business in a session at all.
+    #[test]
+    fn a_document_proof_is_not_a_session_proof() {
+        let registered = Registered {
+            commitment: FieldElement::from_u64(1),
+            secret_binding: FieldElement::from_u64(2),
+        };
+
+        let policy = Policy::new(FieldElement::from_u64(42), FieldElement::from_u64(7));
+
+        let proof = Proof {
+            circuit: Circuit::Sod,
+            verification_key: Vec::new(),
+            bytes: Vec::new(),
+            public_inputs: PublicInputs::new(Circuit::Sod, vec![FieldElement::from_u64(0); 5])
+                .unwrap(),
+        };
+
+        assert_eq!(
+            verify_session(&[proof], &policy, &registered).unwrap_err(),
+            Failure::NotASessionProof { circuit: "sod" }
         );
     }
 

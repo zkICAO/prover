@@ -18,7 +18,8 @@
 use std::path::{Path, PathBuf};
 
 use zkicao_prover::{
-    parse_public_inputs, verify_bundle, Circuit, Failure, FieldElement, Policy, Proof, Statement,
+    parse_public_inputs, verify_bundle, verify_session, Circuit, Failure, FieldElement, Policy,
+    Proof, Registered, Statement,
 };
 
 const DOMAIN: u64 = 42;
@@ -332,6 +333,113 @@ fn a_date_inside_the_window_is_accepted() {
     let policy = policy_accepting(&proofs).require_date_within(20260701, 20260731);
 
     assert!(verify_bundle(&proofs, &policy).is_ok());
+}
+
+/// What the relying party stored when the registration verified.
+fn registered(directory: &Path) -> Registered {
+    let proof = load(directory, "registration", Circuit::Registration);
+
+    Registered {
+        commitment: proof.public_inputs.registration_commitment().unwrap(),
+        secret_binding: proof.public_inputs.registration_secret_binding().unwrap(),
+    }
+}
+
+/// A session: questions only, against a registration from an earlier
+/// exchange.
+fn session(directory: &Path) -> Vec<Proof> {
+    vec![
+        load(directory, "predicate_compare", Circuit::Compare),
+        load(directory, "nullifier", Circuit::Nullifier),
+    ]
+}
+
+#[test]
+fn a_later_session_verifies_against_the_stored_registration() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = session(&directory);
+
+    let verified = verify_session(&proofs, &policy_accepting(&proofs), &registered(&directory))
+        .expect("a session against the stored registration must verify");
+
+    assert!(!verified
+        .nullifier
+        .expect("the session carries a nullifier")
+        .is_zero());
+
+    // No document proof ran here, so nothing re-establishes trust or dates;
+    // those are the stored registration's.
+    assert!(verified.dsc_commitment.is_none());
+
+    assert!(verified.asserted_date.is_none());
+
+    assert!(verified.signer_registry_root.is_none());
+
+    assert_eq!(
+        verified.statements,
+        vec![Statement::Compare {
+            field_id: 5,
+            minimum: 0,
+            maximum: 20080725,
+        }]
+    );
+}
+
+#[test]
+fn a_session_against_another_registration_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = session(&directory);
+
+    let mut other = registered(&directory);
+
+    other.commitment = FieldElement::from_u64(123);
+
+    assert_eq!(
+        verify_session(&proofs, &policy_accepting(&proofs), &other).unwrap_err(),
+        Failure::UnlinkedCommitment {
+            circuit: "predicate_compare"
+        }
+    );
+}
+
+#[test]
+fn a_session_nullifier_from_another_document_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = session(&directory);
+
+    let mut other = registered(&directory);
+
+    other.secret_binding = FieldElement::from_u64(123);
+
+    assert_eq!(
+        verify_session(&proofs, &policy_accepting(&proofs), &other).unwrap_err(),
+        Failure::NullifierFromAnotherDocument
+    );
+}
+
+#[test]
+fn a_document_proof_in_a_session_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let mut proofs = session(&directory);
+
+    proofs.push(load(&directory, "sod", Circuit::Sod));
+
+    assert_eq!(
+        verify_session(&proofs, &policy_accepting(&proofs), &registered(&directory)).unwrap_err(),
+        Failure::NotASessionProof { circuit: "sod" }
+    );
 }
 
 /// A bundle in the aggregate form: one registration proof standing for the
