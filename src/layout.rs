@@ -23,6 +23,7 @@ pub enum Circuit {
     Nullifier,
     AnchorInclusion,
     AnchorChain,
+    Registration,
 }
 
 impl Circuit {
@@ -37,6 +38,7 @@ impl Circuit {
             Self::Nullifier => "nullifier",
             Self::AnchorInclusion => "anchor_inclusion",
             Self::AnchorChain => "anchor_chain",
+            Self::Registration => "registration",
         }
     }
 
@@ -51,6 +53,7 @@ impl Circuit {
             Self::Nullifier => 5,
             Self::AnchorInclusion => 4,
             Self::AnchorChain => 5,
+            Self::Registration => 6,
         }
     }
 
@@ -67,6 +70,7 @@ impl Circuit {
             Self::Nullifier => 2,
             Self::AnchorInclusion => 1,
             Self::AnchorChain => 2,
+            Self::Registration => 0,
         }
     }
 
@@ -219,6 +223,33 @@ impl PublicInputs {
         }
     }
 
+    // registration: domain, context, then the returned commitment, secret
+    // binding, current date and registry root. The signer commitment is
+    // deliberately not among them: signer trust is proved inside.
+    pub fn registration_commitment(&self) -> Result<FieldElement, Error> {
+        self.expect(Circuit::Registration)?;
+
+        self.at(2)
+    }
+
+    pub fn registration_secret_binding(&self) -> Result<FieldElement, Error> {
+        self.expect(Circuit::Registration)?;
+
+        self.at(3)
+    }
+
+    pub fn registration_current_date(&self) -> Result<FieldElement, Error> {
+        self.expect(Circuit::Registration)?;
+
+        self.at(4)
+    }
+
+    pub fn registration_registry_root(&self) -> Result<FieldElement, Error> {
+        self.expect(Circuit::Registration)?;
+
+        self.at(5)
+    }
+
     pub fn nullifier_value(&self) -> Result<FieldElement, Error> {
         self.expect(Circuit::Nullifier)?;
 
@@ -245,7 +276,7 @@ fn unexpected(circuit: Circuit) -> Error {
 mod tests {
     use super::*;
 
-    const ALL: [Circuit; 9] = [
+    const ALL: [Circuit; 10] = [
         Circuit::Sod,
         Circuit::DgExtract,
         Circuit::Attributes,
@@ -255,6 +286,7 @@ mod tests {
         Circuit::Nullifier,
         Circuit::AnchorInclusion,
         Circuit::AnchorChain,
+        Circuit::Registration,
     ];
 
     fn inputs(circuit: Circuit) -> PublicInputs {
@@ -329,6 +361,8 @@ mod tests {
             Some(Circuit::AnchorInclusion)
         } else if package.starts_with("anchor_csca_chain") {
             Some(Circuit::AnchorChain)
+        } else if package.starts_with("registration_") {
+            Some(Circuit::Registration)
         } else {
             None
         }
@@ -483,6 +517,27 @@ mod tests {
                     assert_eq!(
                         names[index_of(&public.anchor_dsc_commitment().unwrap())],
                         "return[0]"
+                    );
+                }
+                Circuit::Registration => {
+                    assert_eq!(
+                        names[index_of(&public.registration_commitment().unwrap())],
+                        "return[0]"
+                    );
+
+                    assert_eq!(
+                        names[index_of(&public.registration_secret_binding().unwrap())],
+                        "return[1]"
+                    );
+
+                    assert_eq!(
+                        names[index_of(&public.registration_current_date().unwrap())],
+                        "return[2]"
+                    );
+
+                    assert_eq!(
+                        names[index_of(&public.registration_registry_root().unwrap())],
+                        "return[3]"
                     );
                 }
                 Circuit::Nullifier => {

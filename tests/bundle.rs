@@ -109,7 +109,10 @@ fn a_real_bundle_verifies() {
 
     assert_eq!(verified.signer_registry_root, Some(registry_root(&proofs)));
 
-    assert!(!verified.dsc_commitment.is_zero());
+    assert!(!verified
+        .dsc_commitment
+        .expect("a leaf bundle exposes the signer commitment")
+        .is_zero());
 
     // The point of returning statements: the verifier can see that what was
     // proved is the question it asked, rather than some other range over some
@@ -329,6 +332,116 @@ fn a_date_inside_the_window_is_accepted() {
     let policy = policy_accepting(&proofs).require_date_within(20260701, 20260731);
 
     assert!(verify_bundle(&proofs, &policy).is_ok());
+}
+
+/// A bundle in the aggregate form: one registration proof standing for the
+/// four leaf proofs, plus the per session questions.
+fn registration_bundle(directory: &Path) -> Vec<Proof> {
+    vec![
+        load(directory, "registration", Circuit::Registration),
+        load(directory, "predicate_compare", Circuit::Compare),
+        load(directory, "nullifier", Circuit::Nullifier),
+    ]
+}
+
+#[test]
+fn a_registration_bundle_verifies() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = registration_bundle(&directory);
+
+    let verified = verify_bundle(&proofs, &policy_accepting(&proofs))
+        .expect("a registration bundle straight from the circuits must verify");
+
+    // The nullifier chains against the registration proof's secret binding
+    // and commitment exactly as it does against the leaf proofs'.
+    assert!(!verified
+        .nullifier
+        .expect("the bundle carries a nullifier")
+        .is_zero());
+
+    // Signer trust was proved inside, against the registry the anchor used.
+    let registration = load(&directory, "registration", Circuit::Registration);
+
+    assert_eq!(
+        verified.signer_registry_root,
+        Some(
+            registration
+                .public_inputs
+                .registration_registry_root()
+                .unwrap()
+        )
+    );
+
+    // The registration proof deliberately does not expose the signer
+    // commitment.
+    assert!(verified.dsc_commitment.is_none());
+
+    assert_eq!(
+        verified.statements,
+        vec![
+            Statement::DataGroup { number: 1 },
+            Statement::Compare {
+                field_id: 5,
+                minimum: 0,
+                maximum: 20080725,
+            },
+        ]
+    );
+
+    assert_eq!(verified.asserted_date, Some(20260725));
+}
+
+#[test]
+fn a_leaf_proof_beside_a_registration_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let mut proofs = registration_bundle(&directory);
+
+    proofs.push(load(&directory, "dg_extract", Circuit::DgExtract));
+
+    assert_eq!(
+        verify_bundle(&proofs, &policy_accepting(&proofs)).unwrap_err(),
+        Failure::NotLinkableToRegistration {
+            circuit: "dg_extract"
+        }
+    );
+}
+
+#[test]
+fn a_registration_beside_a_security_object_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let mut proofs = bundle(&directory);
+
+    proofs.push(load(&directory, "registration", Circuit::Registration));
+
+    assert_eq!(
+        verify_bundle(&proofs, &policy_accepting(&proofs)).unwrap_err(),
+        Failure::MoreThanOneSecurityObjectProof
+    );
+}
+
+#[test]
+fn a_registration_against_another_registry_is_refused() {
+    let Some(directory) = bundle_directory() else {
+        return;
+    };
+
+    let proofs = registration_bundle(&directory);
+
+    let policy = policy_accepting(&proofs).require_anchor(FieldElement::from_u64(1));
+
+    assert_eq!(
+        verify_bundle(&proofs, &policy).unwrap_err(),
+        Failure::AnchorAgainstAnotherRegistry
+    );
 }
 
 // One domain fixes one policy and one policy over one document gives one

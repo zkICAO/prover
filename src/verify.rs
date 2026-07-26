@@ -120,7 +120,11 @@ impl Policy {
 #[derive(Debug)]
 pub struct Verified {
     pub nullifier: Option<FieldElement>,
-    pub dsc_commitment: FieldElement,
+    /// The salted signer commitment, when the bundle's document proof exposes
+    /// one. A Passive Authentication proof does; a registration proof
+    /// deliberately does not, because signer trust is proved inside it, so a
+    /// registration bundle returns `None` here.
+    pub dsc_commitment: Option<FieldElement>,
     /// Everything the bundle established, in the order the proofs appeared.
     /// A relying party has to read this to know whether the question it asked
     /// is the question that was answered.
@@ -149,6 +153,7 @@ pub enum Failure {
     UnlinkedCommitment { circuit: &'static str },
     NullifierFromAnotherDocument,
     MoreThanOneNullifierProof,
+    NotLinkableToRegistration { circuit: &'static str },
     NoTrustAnchorProof,
     RegistryRootNotSet,
     DateOutsideWindow { circuit: &'static str },
@@ -162,12 +167,12 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoSecurityObjectProof => {
-                write!(f, "the bundle has no Passive Authentication proof, so nothing establishes the document was signed")
+                write!(f, "the bundle has neither a Passive Authentication proof nor a registration proof, so nothing establishes the document was signed")
             }
             Self::MoreThanOneSecurityObjectProof => {
                 write!(
                     f,
-                    "the bundle has more than one Passive Authentication proof"
+                    "the bundle has more than one proof establishing a document, so it describes more than one"
                 )
             }
             Self::UntrustedVerificationKey { circuit } => {
@@ -207,6 +212,12 @@ impl std::fmt::Display for Failure {
                 write!(
                     f,
                     "the bundle has more than one nullifier proof, so which value the application stores would be ambiguous"
+                )
+            }
+            Self::NotLinkableToRegistration { circuit } => {
+                write!(
+                    f,
+                    "{circuit} cannot appear beside a registration proof, which does not expose the value it would have to match"
                 )
             }
             Self::RegistryRootNotSet => {
@@ -261,7 +272,7 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
         return Err(Failure::RegistryRootNotSet);
     }
 
-    let mut security_objects = Vec::new();
+    let mut document_proofs = Vec::new();
 
     for proof in proofs {
         let name = proof.circuit.name();
@@ -292,90 +303,215 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
             return Err(Failure::WrongContext { circuit: name });
         }
 
-        if proof.circuit == Circuit::Sod {
-            security_objects.push(proof);
+        if proof.circuit == Circuit::Sod || proof.circuit == Circuit::Registration {
+            document_proofs.push(proof);
         }
     }
 
-    let security_object = match security_objects.len() {
+    let document = match document_proofs.len() {
         0 => return Err(Failure::NoSecurityObjectProof),
-        1 => security_objects[0],
+        1 => document_proofs[0],
         _ => return Err(Failure::MoreThanOneSecurityObjectProof),
     };
-
-    let econtent_binding = security_object
-        .public_inputs
-        .sod_econtent_binding()
-        .map_err(malformed)?;
-
-    let mut data_group_bindings = Vec::new();
-
-    for proof in proofs.iter().filter(|p| p.circuit == Circuit::DgExtract) {
-        let seen = proof
-            .public_inputs
-            .dg_extract_econtent_binding()
-            .map_err(malformed)?;
-
-        if seen != econtent_binding {
-            return Err(Failure::UnlinkedDataGroup {
-                circuit: proof.circuit.name(),
-            });
-        }
-
-        data_group_bindings.push(
-            proof
-                .public_inputs
-                .dg_extract_dg_binding()
-                .map_err(malformed)?,
-        );
-    }
 
     let mut statements = Vec::new();
 
     let mut asserted_date = None;
 
-    for proof in proofs.iter().filter(|p| p.circuit == Circuit::DgExtract) {
-        let number = proof
-            .public_inputs
-            .dg_number()
-            .map_err(malformed)?
-            .to_u64()
-            .map_err(malformed)?;
-
-        statements.push(Statement::DataGroup { number });
-    }
-
     let mut commitments = Vec::new();
 
-    for proof in proofs.iter().filter(|p| p.circuit == Circuit::Attributes) {
-        let binding = proof
+    let mut signer_registry_root = None;
+
+    let document_secret_binding;
+
+    let dsc_commitment;
+
+    if document.circuit == Circuit::Sod {
+        let econtent_binding = document
             .public_inputs
-            .attributes_dg_binding()
+            .sod_econtent_binding()
             .map_err(malformed)?;
 
-        if !data_group_bindings.contains(&binding) {
-            return Err(Failure::UnlinkedDataGroup {
-                circuit: proof.circuit.name(),
-            });
+        let mut data_group_bindings = Vec::new();
+
+        for proof in proofs.iter().filter(|p| p.circuit == Circuit::DgExtract) {
+            let seen = proof
+                .public_inputs
+                .dg_extract_econtent_binding()
+                .map_err(malformed)?;
+
+            if seen != econtent_binding {
+                return Err(Failure::UnlinkedDataGroup {
+                    circuit: proof.circuit.name(),
+                });
+            }
+
+            data_group_bindings.push(
+                proof
+                    .public_inputs
+                    .dg_extract_dg_binding()
+                    .map_err(malformed)?,
+            );
         }
 
-        let date = proof
+        for proof in proofs.iter().filter(|p| p.circuit == Circuit::DgExtract) {
+            let number = proof
+                .public_inputs
+                .dg_number()
+                .map_err(malformed)?
+                .to_u64()
+                .map_err(malformed)?;
+
+            statements.push(Statement::DataGroup { number });
+        }
+
+        for proof in proofs.iter().filter(|p| p.circuit == Circuit::Attributes) {
+            let binding = proof
+                .public_inputs
+                .attributes_dg_binding()
+                .map_err(malformed)?;
+
+            if !data_group_bindings.contains(&binding) {
+                return Err(Failure::UnlinkedDataGroup {
+                    circuit: proof.circuit.name(),
+                });
+            }
+
+            let date = proof
+                .public_inputs
+                .attributes_current_date()
+                .map_err(malformed)?
+                .to_u64()
+                .map_err(malformed)?;
+
+            check_date(policy, date, proof.circuit.name())?;
+
+            record_date(&mut asserted_date, date)?;
+
+            commitments.push(
+                proof
+                    .public_inputs
+                    .attributes_commitment()
+                    .map_err(malformed)?,
+            );
+        }
+
+        let sod_dsc_commitment = document
             .public_inputs
-            .attributes_current_date()
+            .sod_dsc_commitment()
+            .map_err(malformed)?;
+
+        for proof in proofs
+            .iter()
+            .filter(|p| p.circuit == Circuit::AnchorInclusion || p.circuit == Circuit::AnchorChain)
+        {
+            if proof
+                .public_inputs
+                .anchor_dsc_commitment()
+                .map_err(malformed)?
+                != sod_dsc_commitment
+            {
+                return Err(Failure::AnchorForAnotherSigner);
+            }
+
+            if proof.circuit == Circuit::AnchorChain {
+                let date = proof
+                    .public_inputs
+                    .anchor_current_date()
+                    .map_err(malformed)?
+                    .to_u64()
+                    .map_err(malformed)?;
+
+                check_date(policy, date, proof.circuit.name())?;
+
+                record_date(&mut asserted_date, date)?;
+            }
+
+            let root = proof
+                .public_inputs
+                .anchor_registry_root()
+                .map_err(malformed)?;
+
+            if let Some(expected) = policy.registry_root {
+                if root != expected {
+                    return Err(Failure::AnchorAgainstAnotherRegistry);
+                }
+            }
+
+            signer_registry_root = Some(root);
+        }
+
+        if policy.require_trust_anchor && signer_registry_root.is_none() {
+            return Err(Failure::NoTrustAnchorProof);
+        }
+
+        document_secret_binding = document
+            .public_inputs
+            .sod_secret_binding()
+            .map_err(malformed)?;
+
+        dsc_commitment = Some(sod_dsc_commitment);
+    } else {
+        // The registration proof aggregated the extraction, the attributes
+        // and the anchor, and it exposes only what downstream proofs link
+        // against. A leaf proof of those kinds beside it has nothing to be
+        // checked against, so it cannot be accepted silently.
+        for proof in proofs {
+            match proof.circuit {
+                Circuit::DgExtract
+                | Circuit::Attributes
+                | Circuit::AnchorInclusion
+                | Circuit::AnchorChain => {
+                    return Err(Failure::NotLinkableToRegistration {
+                        circuit: proof.circuit.name(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        let date = document
+            .public_inputs
+            .registration_current_date()
             .map_err(malformed)?
             .to_u64()
             .map_err(malformed)?;
 
-        check_date(policy, date, proof.circuit.name())?;
+        check_date(policy, date, document.circuit.name())?;
 
         record_date(&mut asserted_date, date)?;
 
+        // The registration circuit pins the extraction to data group 1.
+        statements.push(Statement::DataGroup { number: 1 });
+
         commitments.push(
-            proof
+            document
                 .public_inputs
-                .attributes_commitment()
+                .registration_commitment()
                 .map_err(malformed)?,
         );
+
+        let root = document
+            .public_inputs
+            .registration_registry_root()
+            .map_err(malformed)?;
+
+        if let Some(expected) = policy.registry_root {
+            if root != expected {
+                return Err(Failure::AnchorAgainstAnotherRegistry);
+            }
+        }
+
+        // Signer trust is proved inside a registration proof, so a policy
+        // that requires an anchor is satisfied by construction here.
+        signer_registry_root = Some(root);
+
+        document_secret_binding = document
+            .public_inputs
+            .registration_secret_binding()
+            .map_err(malformed)?;
+
+        dsc_commitment = None;
     }
 
     let mut nullifier = None;
@@ -458,12 +594,7 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
                     .nullifier_secret_binding()
                     .map_err(malformed)?;
 
-                if binding
-                    != security_object
-                        .public_inputs
-                        .sod_secret_binding()
-                        .map_err(malformed)?
-                {
+                if binding != document_secret_binding {
                     return Err(Failure::NullifierFromAnotherDocument);
                 }
 
@@ -478,57 +609,6 @@ pub fn verify_bundle(proofs: &[Proof], policy: &Policy) -> Result<Verified, Fail
             }
             _ => {}
         }
-    }
-
-    let dsc_commitment = security_object
-        .public_inputs
-        .sod_dsc_commitment()
-        .map_err(malformed)?;
-
-    let mut signer_registry_root = None;
-
-    for proof in proofs
-        .iter()
-        .filter(|p| p.circuit == Circuit::AnchorInclusion || p.circuit == Circuit::AnchorChain)
-    {
-        if proof
-            .public_inputs
-            .anchor_dsc_commitment()
-            .map_err(malformed)?
-            != dsc_commitment
-        {
-            return Err(Failure::AnchorForAnotherSigner);
-        }
-
-        if proof.circuit == Circuit::AnchorChain {
-            let date = proof
-                .public_inputs
-                .anchor_current_date()
-                .map_err(malformed)?
-                .to_u64()
-                .map_err(malformed)?;
-
-            check_date(policy, date, proof.circuit.name())?;
-
-            record_date(&mut asserted_date, date)?;
-        }
-
-        let root = proof
-            .public_inputs
-            .anchor_registry_root()
-            .map_err(malformed)?;
-
-        if let Some(expected) = policy.registry_root {
-            if root != expected {
-                return Err(Failure::AnchorAgainstAnotherRegistry);
-            }
-        }
-
-        signer_registry_root = Some(root);
-    }
-
-    if policy.require_trust_anchor && signer_registry_root.is_none() {
-        return Err(Failure::NoTrustAnchorProof);
     }
 
     Ok(Verified {
