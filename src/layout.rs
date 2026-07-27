@@ -59,7 +59,7 @@ impl Circuit {
             Self::AnchorChain => 5,
             Self::Registration => 6,
             Self::SessionCompareMember => 8,
-            Self::ChipActive => 4,
+            Self::ChipActive => 3,
         }
     }
 
@@ -260,9 +260,9 @@ impl PublicInputs {
         self.at(5)
     }
 
-    // chip_active: dg_binding, domain, context, then the returned binding.
-    // A chip proof says the chip answered this exchange, and it attaches to
-    // the rest through that binding, the same way an attribute proof does.
+    // chip_active: dg_binding, domain, context. A chip proof says the chip
+    // answered this exchange, and it attaches to the rest through that
+    // binding, the same way an attribute proof does.
     pub fn chip_dg_binding(&self) -> Result<FieldElement, Error> {
         self.expect(Circuit::ChipActive)?;
 

@@ -22,7 +22,7 @@ It also does not keep state. Recognising a nullifier it has seen before is the a
 
 ## Layout compatibility
 
-The public input indices this crate reads are fixed by circuit signatures in [zkICAO/circuits](https://github.com/zkICAO/circuits), a separate repository, so the table here can drift from them silently. `layout.manifest` is the guard: it is generated from the compiled ABIs, committed here, and checked by tests. A signature change not reflected in a regenerated manifest fails them. It has already caught one drift.
+The public input indices this crate reads are fixed by circuit signatures in [zkICAO/circuits](https://github.com/zkICAO/circuits), a separate repository, so the table here can drift from them silently. `layout.manifest` is the guard: it is generated from the compiled ABIs, committed here, and checked by tests. A signature change not reflected in a regenerated manifest fails them; the regeneration commits in this repository's history are that guard doing its job.
 
 ## Platform
 

@@ -2,7 +2,7 @@
 name = "zkicao-prover"
 version = "0.0.1"
 edition = "2021"
-description = "Proving and off-chain verification library for zkICAO circuits (noir_rs + native Barretenberg FFI)"
+description = "Off-chain verification library for zkICAO proof bundles, over the Barretenberg CLI"
 license = "MIT"
 
 [lib]
